@@ -117,6 +117,27 @@ class StepFunctionResponse(BaseResponse):
         }
         return ActionResult(response)
 
+    def list_state_machine_versions(self) -> ActionResult:
+        state_machine_arn = self._get_param("stateMachineArn")
+        max_results = self._get_int_param("maxResults")
+        next_token = self._get_param("nextToken")
+        results, next_token = self.stepfunction_backend.list_state_machine_versions(
+            arn=state_machine_arn, max_results=max_results, next_token=next_token
+        )
+        state_machine_versions = [
+            {
+                "creationDate": state_machine_version.creation_date,
+                "stateMachineVersionArn": state_machine_version.arn,
+            }
+            for state_machine_version in results
+        ]
+
+        response = {
+            "stateMachineVersions": state_machine_versions,
+            "nextToken": next_token,
+        }
+        return ActionResult(response)
+
     def describe_state_machine(self) -> ActionResult:
         arn = self._get_param("stateMachineArn")
         return self._describe_state_machine(arn)

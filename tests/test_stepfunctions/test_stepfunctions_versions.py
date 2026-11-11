@@ -134,3 +134,60 @@ def test_create_unpublished_state_machine_with_version_description():
 
     finally:
         iam.delete_role(RoleName=role_name)
+
+
+@pytest.mark.parametrize("use_parser", [True, False], ids=["use_parser", "use_mock"])
+def test_list_state_machine_versions(use_parser):
+    with mock_aws(config={"stepfunctions": {"execute_state_machine": use_parser}}):
+        client = boto3.client("stepfunctions", region_name="us-east-1")
+        role = "arn:aws:iam::123456789012:role/unknown_sf_role"
+
+        unpublished = client.create_state_machine(
+            name="unpublished", definition=simple_definition, roleArn=role
+        )["stateMachineArn"]
+        assert (
+            client.list_state_machine_versions(stateMachineArn=unpublished)[
+                "stateMachineVersions"
+            ]
+            == []
+        )
+
+        response = client.create_state_machine(
+            name="published", definition=simple_definition, roleArn=role, publish=True
+        )
+        arn = response["stateMachineArn"]
+        version_arn1 = response["stateMachineVersionArn"]
+        version_arn2 = client.update_state_machine(
+            stateMachineArn=arn, definition=simple_definition, publish=True
+        )["stateMachineVersionArn"]
+
+        versions = client.list_state_machine_versions(stateMachineArn=arn)[
+            "stateMachineVersions"
+        ]
+        assert [v["stateMachineVersionArn"] for v in versions] == [
+            version_arn2,
+            version_arn1,
+        ]
+        assert all("creationDate" in v for v in versions)
+
+        page = client.list_state_machine_versions(stateMachineArn=arn, maxResults=1)
+        assert [v["stateMachineVersionArn"] for v in page["stateMachineVersions"]] == [
+            version_arn2
+        ]
+        page = client.list_state_machine_versions(
+            stateMachineArn=arn, maxResults=1, nextToken=page["nextToken"]
+        )
+        assert [v["stateMachineVersionArn"] for v in page["stateMachineVersions"]] == [
+            version_arn1
+        ]
+        assert "nextToken" not in page
+
+
+@mock_aws
+def test_list_state_machine_versions_of_an_unknown_state_machine():
+    client = boto3.client("stepfunctions", region_name="us-east-1")
+    with pytest.raises(ClientError) as exc:
+        client.list_state_machine_versions(
+            stateMachineArn="arn:aws:states:us-east-1:123456789012:stateMachine:unknown"
+        )
+    assert exc.value.response["Error"]["Code"] == "StateMachineDoesNotExist"
