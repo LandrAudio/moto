@@ -3,9 +3,10 @@ from uuid import uuid4
 
 import boto3
 import pytest
+import requests
 from botocore.exceptions import ClientError
 
-from moto import mock_aws
+from moto import mock_aws, settings
 from moto.s3.responses import DEFAULT_REGION_NAME
 
 
@@ -641,3 +642,144 @@ def test_lifecycle_empty_configuration():
     assert ex.value.response["Error"]["Message"] == (
         "The lifecycle configuration does not exist"
     )
+
+
+@mock_aws
+@pytest.mark.parametrize(
+    "lc_filter",
+    [
+        {"ObjectSizeGreaterThan": 0},
+        {"ObjectSizeLessThan": 1024},
+        {
+            "And": {
+                "Prefix": "logs/",
+                "Tags": [{"Key": "k", "Value": "v"}],
+                "ObjectSizeGreaterThan": 0,
+            }
+        },
+        {"And": {"ObjectSizeGreaterThan": 128, "ObjectSizeLessThan": 1024}},
+    ],
+    ids=["greater_than", "less_than", "and_with_prefix_and_tags", "and_sizes_only"],
+)
+def test_lifecycle_with_object_size_filters(lc_filter):
+    client = boto3.client("s3", DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name)
+
+    lfc = {
+        "Rules": [
+            {
+                "Expiration": {"Days": 7},
+                "ID": "sizes",
+                "Filter": lc_filter,
+                "Status": "Enabled",
+            }
+        ]
+    }
+    client.put_bucket_lifecycle_configuration(
+        Bucket=bucket_name, LifecycleConfiguration=lfc
+    )
+
+    result = client.get_bucket_lifecycle_configuration(Bucket=bucket_name)
+    assert result["Rules"][0]["Filter"] == lc_filter
+
+
+@mock_aws
+def test_lifecycle_with_object_size_filters_outside_and():
+    client = boto3.client("s3", DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name)
+
+    # Only one of Prefix, Tag, ObjectSizeGreaterThan, ObjectSizeLessThan or And is allowed
+    for lc_filter in [
+        {"ObjectSizeGreaterThan": 128, "ObjectSizeLessThan": 1024},
+        {"Prefix": "logs/", "ObjectSizeGreaterThan": 128},
+    ]:
+        lfc = {
+            "Rules": [
+                {
+                    "Expiration": {"Days": 7},
+                    "ID": "sizes",
+                    "Filter": lc_filter,
+                    "Status": "Enabled",
+                }
+            ]
+        }
+        with pytest.raises(ClientError) as ex:
+            client.put_bucket_lifecycle_configuration(
+                Bucket=bucket_name, LifecycleConfiguration=lfc
+            )
+        assert ex.value.response["Error"]["Code"] == "MalformedXML"
+
+
+@mock_aws
+@pytest.mark.parametrize(
+    "lc_filter,message",
+    [
+        (
+            {"And": {"ObjectSizeGreaterThan": 1024, "ObjectSizeLessThan": 128}},
+            "ObjectSizeGreaterThan must be less than ObjectSizeLessThan",
+        ),
+        (
+            {"And": {"ObjectSizeGreaterThan": 128, "ObjectSizeLessThan": 128}},
+            "ObjectSizeGreaterThan must be less than ObjectSizeLessThan",
+        ),
+        (
+            {"ObjectSizeLessThan": 50 * 1024**4 + 1},
+            "ObjectSizeLessThan must be less than or equal to 50 TB",
+        ),
+    ],
+    ids=["greater_than_above_less_than", "equal_bounds", "above_50_tb"],
+)
+def test_lifecycle_with_invalid_object_size_filters(lc_filter, message):
+    client = boto3.client("s3", DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name)
+
+    lfc = {
+        "Rules": [
+            {
+                "Expiration": {"Days": 7},
+                "ID": "sizes",
+                "Filter": lc_filter,
+                "Status": "Enabled",
+            }
+        ]
+    }
+    with pytest.raises(ClientError) as ex:
+        client.put_bucket_lifecycle_configuration(
+            Bucket=bucket_name, LifecycleConfiguration=lfc
+        )
+    assert ex.value.response["Error"]["Code"] == "InvalidArgument"
+    assert ex.value.response["Error"]["Message"] == message
+
+
+@mock_aws
+@pytest.mark.parametrize(
+    "size",
+    [
+        "<ObjectSizeGreaterThan>abc</ObjectSizeGreaterThan>",
+        "<ObjectSizeGreaterThan><x/></ObjectSizeGreaterThan>",
+    ],
+    ids=["not_an_integer", "nested_element"],
+)
+def test_lifecycle_with_malformed_object_size_filter(size):
+    # botocore refuses non-integer sizes, so send the XML ourselves
+    client = boto3.client("s3", DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name)
+    body = (
+        "<LifecycleConfiguration><Rule><ID>sizes</ID><Status>Enabled</Status>"
+        f"<Filter>{size}</Filter><Expiration><Days>7</Days></Expiration>"
+        "</Rule></LifecycleConfiguration>"
+    )
+
+    endpoint = (
+        settings.test_server_mode_endpoint()
+        if settings.TEST_SERVER_MODE
+        else "https://s3.amazonaws.com"
+    )
+    response = requests.put(f"{endpoint}/{bucket_name}?lifecycle", data=body)
+
+    assert response.status_code == 400
+    assert "<Code>MalformedXML</Code>" in response.text
