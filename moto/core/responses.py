@@ -26,7 +26,11 @@ from moto.core.common_types import TYPE_IF_NONE, TYPE_RESPONSE
 from moto.core.exceptions import ServiceException
 from moto.core.model import OperationModel, ServiceModel
 from moto.core.parse import PROTOCOL_PARSERS, XFormedDict
-from moto.core.request import determine_request_protocol, normalize_request
+from moto.core.request import (
+    determine_request_protocol,
+    is_rpc_v2_cbor,
+    normalize_request,
+)
 from moto.core.serialize import (
     ResponseSerializer,
     XFormedAttributePicker,
@@ -48,6 +52,8 @@ from moto.utilities.paginator import paginate
 from moto.utilities.utils import get_partition
 
 log = logging.getLogger(__name__)
+
+RPC_V2_PATH = re.compile(r"^/service/[^/]+/operation/([^/]+)$")
 
 
 ResponseShape = TypeVar("ResponseShape", bound="BaseResponse")
@@ -274,13 +280,15 @@ class BaseResponse(ActionAuthenticatorMixin):
         ):
             self.body = gzip_decompress(self.body)
 
-        if isinstance(self.body, bytes) and not use_raw_body:
+        # A Smithy RPCv2 CBOR body is binary: the protocol parser reads it
+        is_cbor = is_rpc_v2_cbor(headers)
+        if isinstance(self.body, bytes) and not use_raw_body and not is_cbor:
             self.body = self.body.decode("utf-8")
 
         if not querystring:
             querystring.update(parse_qs(self.parsed_url.query, keep_blank_values=True))
         if not querystring:
-            if self.body and not use_raw_body:
+            if self.body and not use_raw_body and not is_cbor:
                 try:
                     querystring.update(
                         OrderedDict(
@@ -462,6 +470,10 @@ class BaseResponse(ActionAuthenticatorMixin):
         match = self.headers.get("x-amz-target") or self.headers.get("X-Amz-Target")
         if match:
             return match.split(".")[-1]
+        # Smithy RPCv2 CBOR: POST /service/{serviceName}/operation/{operationName}
+        rpc_v2 = RPC_V2_PATH.match(self.path or "")
+        if rpc_v2 and is_rpc_v2_cbor(self.headers):
+            return rpc_v2.group(1)
         # get action from method and uri
         return self._get_action_from_method_and_request_uri(self.method, self.raw_path)
 
@@ -474,7 +486,9 @@ class BaseResponse(ActionAuthenticatorMixin):
         service_model = get_service_model(self.boto3_service_name)
         operation_model = service_model.operation_model(self._get_action())
         protocol = determine_request_protocol(
-            service_model, normalized_request.content_type
+            service_model,
+            normalized_request.content_type,
+            rpc_v2_cbor=is_rpc_v2_cbor(self.headers),
         )
         parser_cls = PROTOCOL_PARSERS[protocol]
         parser = parser_cls(operation_model, map_type=self.PROTOCOL_PARSER_MAP_TYPE)
@@ -492,7 +506,9 @@ class BaseResponse(ActionAuthenticatorMixin):
 
     def determine_response_protocol(self, service_model: ServiceModel) -> str:
         content_type = self.headers.get("Content-Type", "")
-        protocol = determine_request_protocol(service_model, content_type)
+        protocol = determine_request_protocol(
+            service_model, content_type, rpc_v2_cbor=is_rpc_v2_cbor(self.headers)
+        )
         if protocol == "query" and self.request_json:
             protocol = "query-json"
         return protocol
