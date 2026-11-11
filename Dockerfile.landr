@@ -1,0 +1,20 @@
+# The LANDR Moto image: Moto 5.2.3 with the fixes on branch landr/5.2.3 (landr/README.md).
+# Same recipe as Moto's own Dockerfile (motoserver/moto:5.2.3): Alpine, Python 3.13, an editable
+# install in /moto, curl, `moto_server -H 0.0.0.0` on port 5000. The base image and every Python
+# package are pinned to what motoserver/moto:5.2.3 holds (landr/constraints.txt).
+#   docker buildx build -f Dockerfile.landr --platform linux/amd64,linux/arm64 -t <registry>/moto:5.2.3-landr.1 .
+FROM python:3.13.15-alpine3.24
+
+ADD . /moto/
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /moto/
+RUN  pip3 --no-cache-dir install --upgrade pip --constraint landr/constraints.txt && \
+     pip3 --no-cache-dir install --editable ".[server]" --constraint landr/constraints.txt
+
+# Install cURL
+RUN  apk add --no-cache curl
+
+ENTRYPOINT ["/usr/local/bin/moto_server", "-H", "0.0.0.0"]
+
+EXPOSE 5000
