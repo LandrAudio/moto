@@ -1,0 +1,42 @@
+# LANDR fork: lint and the tests of the services the landr/* commits touch.
+# Upstream's workflows are dropped on landr/* branches (their matrix and publishing are getmoto's).
+name: LANDR tests
+
+on:
+  push:
+    branches: ["landr/**"]
+  pull_request:
+    branches: ["landr/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: landr-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Moto's tests never reach AWS; fake credentials, no profile.
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: make init
+      - name: Lint (ruff, mypy)
+        run: make lint
+      - name: Tests of the touched services (no Docker-backed tests)
+        run: >-
+          pytest -n 4 -rs -m "not requires_docker"
+          tests/test_s3 tests/test_stepfunctions tests/test_ec2 tests/test_cloudwatch
+          tests/test_awslambda tests/test_core tests/test_moto_api
