@@ -1,8 +1,12 @@
+import datetime
 import json
 from collections.abc import Callable
+from functools import cache
 from typing import Any, Final
 
 from botocore.exceptions import ClientError
+from botocore.model import OperationModel, ServiceModel
+from botocore.session import get_session
 
 from moto.stepfunctions.parser.api import (
     DescribeExecutionOutput,
@@ -37,6 +41,7 @@ from moto.stepfunctions.parser.asl.eval.environment import Environment
 from moto.stepfunctions.parser.asl.eval.event.event_detail import EventDetails
 from moto.stepfunctions.parser.asl.utils.boto_client import boto_client_for
 from moto.stepfunctions.parser.asl.utils.encoding import to_json_str
+from moto.stepfunctions.parser.utils import camel_to_snake_case
 from moto.utilities.collections import select_from_typed_dict
 
 _SUPPORTED_INTEGRATION_PATTERNS: Final[set[ResourceCondition]] = {
@@ -47,6 +52,19 @@ _SUPPORTED_INTEGRATION_PATTERNS: Final[set[ResourceCondition]] = {
 _SUPPORTED_API_PARAM_BINDINGS: Final[dict[str, set[str]]] = {
     "startexecution": {"Input", "Name", "StateMachineArn"}
 }
+
+
+@cache
+def _sfn_service_model() -> ServiceModel:
+    return get_session().get_service_model("stepfunctions")
+
+
+def _sfn_operation_model(boto_action: str) -> OperationModel | None:
+    model = _sfn_service_model()
+    for operation_name in model.operation_names:
+        if camel_to_snake_case(operation_name) == boto_action:
+            return model.operation_model(operation_name)
+    return None
 
 
 class StateTaskServiceSfn(StateTaskServiceCallback):
@@ -111,6 +129,37 @@ class StateTaskServiceSfn(StateTaskServiceCallback):
             boto_service_name=boto_service_name,
             service_action_name=service_action_name,
         )
+        # The ASL names the parameters as AWS documents them (StateMachineArn, Input, Name),
+        # the API's members are camelCase (stateMachineArn, input, name)
+        operation = _sfn_operation_model(
+            self._get_boto_service_action(service_action_name)
+        )
+        if operation is not None and operation.input_shape is not None:
+            self._to_boto_request(parameters, operation.input_shape)
+
+    def _normalise_response(
+        self,
+        response: Any,
+        boto_service_name: str | None = None,
+        service_action_name: str | None = None,
+    ) -> None:
+        super()._normalise_response(
+            response=response,
+            boto_service_name=boto_service_name,
+            service_action_name=service_action_name,
+        )
+        # The state's output names the answer as AWS shows it (ExecutionArn, StartDate, Status...),
+        # dates in epoch milliseconds
+        operation = _sfn_operation_model(
+            self._get_boto_service_action(service_action_name)
+        )
+        if operation is None or operation.output_shape is None:
+            return
+        self._from_boto_response(response, operation.output_shape)
+        if isinstance(response, dict):
+            for key, value in response.items():
+                if isinstance(value, datetime.datetime):
+                    response[key] = int(value.timestamp() * 1000)
 
     def _build_sync_resolver(
         self,
