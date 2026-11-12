@@ -29,6 +29,7 @@ from .exceptions import (
     NameTooLongException,
     ResourceNotFound,
     StateMachineDoesNotExist,
+    ValidationException,
 )
 from .parser.api import EncryptionType
 from .utils import PAGINATION_MODEL, api_to_cfn_tags, cfn_to_api_tags
@@ -698,6 +699,14 @@ class StepFunctionBackend(BaseBackend, TaggableResourcesMixin):
             raise StateMachineDoesNotExist(f"State Machine Does Not Exist: '{arn}'")
         return sorted(sm.aliases.values(), key=lambda x: x.creation_date)
 
+    @paginate(pagination_model=PAGINATION_MODEL)
+    def list_state_machine_versions(self, arn: str) -> list[StateMachineVersion]:
+        sm = next((x for x in self.state_machines if x.arn == arn), None)
+        if not sm:
+            raise StateMachineDoesNotExist(f"State Machine Does Not Exist: '{arn}'")
+        # Newest first: version numbers only grow (creation dates can be equal)
+        return [sm.versions[n] for n in sorted(sm.versions, reverse=True)]
+
     def describe_state_machine(self, arn: str) -> StateMachine:
         self._validate_machine_arn(arn)
         sm = next((x for x in self.state_machines if x.arn == arn), None)
@@ -788,6 +797,139 @@ class StepFunctionBackend(BaseBackend, TaggableResourcesMixin):
         if publish:
             sm.publish(version_description)
         return sm
+
+    def validate_state_machine_definition(
+        self,
+        definition: str,
+        sm_type: str | None = None,
+        severity: str | None = None,
+        max_results: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Only syntax and schema errors are reported, as diagnostics with severity ERROR and without a location.
+        AWS' semantic checks (unknown Next-targets, missing end states, unreachable states, ...) and AWS' warnings are not yet supported.
+
+        A definition that uses a feature Moto's ASL parser does not support (for instance a Task with an integration that Moto does not know, such as HTTP Tasks) is reported as OK.
+        Request the WARNING severity to see a diagnostic with the code MOTO_UNSUPPORTED_DEFINITION in that case.
+        """
+        errors: list[str] = []
+        if sm_type is not None and sm_type not in ("STANDARD", "EXPRESS"):
+            errors.append(
+                f"Value '{sm_type}' at 'type' failed to satisfy constraint: "
+                "Member must satisfy enum value set: [STANDARD, EXPRESS]"
+            )
+        if severity is not None and severity not in ("ERROR", "WARNING"):
+            errors.append(
+                f"Value '{severity}' at 'severity' failed to satisfy constraint: "
+                "Member must satisfy enum value set: [ERROR, WARNING]"
+            )
+        if max_results is not None and not 0 <= max_results <= 100:
+            constraint = (
+                "greater than or equal to 0"
+                if max_results < 0
+                else "less than or equal to 100"
+            )
+            errors.append(
+                f"Value '{max_results}' at 'maxResults' failed to satisfy constraint: "
+                f"Member must have value {constraint}"
+            )
+        if errors:
+            raise ValidationException(
+                f"{len(errors)} validation error{'s' if len(errors) > 1 else ''} detected: "
+                + "; ".join(errors)
+            )
+
+        diagnostics = [
+            diagnostic
+            for diagnostic in self._definition_diagnostics(definition, sm_type)
+            if severity == "WARNING" or diagnostic["severity"] == "ERROR"
+        ]
+        max_results = max_results or 100
+        return {
+            "result": "FAIL"
+            if any(diagnostic["severity"] == "ERROR" for diagnostic in diagnostics)
+            else "OK",
+            "diagnostics": diagnostics[:max_results],
+            "truncated": len(diagnostics) > max_results,
+        }
+
+    @staticmethod
+    def _definition_diagnostics(
+        definition: str, sm_type: str | None
+    ) -> list[dict[str, str]]:
+        from antlr4.error.Errors import RecognitionException
+
+        from .parser.asl.parse.asl_parser import ASLParserException
+        from .parser.asl.static_analyser.express_static_analyser import (
+            ExpressStaticAnalyser,
+        )
+        from .parser.asl.static_analyser.static_analyser import StaticAnalyser
+
+        def reject_constant(constant: str) -> None:
+            raise ValueError(f"{constant} is not valid JSON")
+
+        try:
+            parsed = json.loads(definition, parse_constant=reject_constant)
+        except ValueError as exception:
+            return [
+                {
+                    "severity": "ERROR",
+                    "code": "INVALID_JSON_DESCRIPTION",
+                    "message": str(exception),
+                }
+            ]
+        missing = [
+            field
+            for field in ("StartAt", "States")
+            if not isinstance(parsed, dict) or field not in parsed
+        ]
+        if missing:
+            return [
+                {
+                    "severity": "ERROR",
+                    "code": "SCHEMA_VALIDATION_FAILED",
+                    "message": f"These fields are required: [{', '.join(missing)}]",
+                }
+            ]
+
+        analyser = ExpressStaticAnalyser() if sm_type == "EXPRESS" else StaticAnalyser()
+        try:
+            analyser.analyse(definition)
+        except ASLParserException as asl_parser_exception:
+            return [
+                {
+                    "severity": "ERROR",
+                    "code": "SCHEMA_VALIDATION_FAILED",
+                    "message": "; ".join(asl_parser_exception.errors)
+                    or "No error details available",
+                }
+            ]
+        except (RecognitionException, NotImplementedError) as exception:
+            # A valid definition can use features that Moto's parser does not know,
+            # such as an integration it does not support
+            return [
+                {
+                    "severity": "WARNING",
+                    "code": "MOTO_UNSUPPORTED_DEFINITION",
+                    "message": f"Moto could not validate this definition: {exception.__class__.__name__}: {exception}",
+                }
+            ]
+        except Exception as exception:
+            # Like create_state_machine, treat anything else as an invalid definition
+            message = str(exception)
+            # The static analysers reject definitions with a ValueError like:
+            # "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: <message>'"
+            rejection = re.match(
+                r"Invalid State Machine Definition: '([A-Z_]+): (.*?)'?$", message
+            )
+            if rejection:
+                code, message = rejection.group(1), rejection.group(2)
+            elif message.startswith("State redefinition"):
+                code = "DUPLICATE_STATE_NAME"
+            else:
+                code = "SCHEMA_VALIDATION_FAILED"
+            return [{"severity": "ERROR", "code": code, "message": message}]
+        return []
 
     def update_state_machine_alias(
         self,

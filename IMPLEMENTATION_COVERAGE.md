@@ -11308,7 +11308,7 @@
 
 ## stepfunctions
 <details>
-<summary>78% implemented</summary>
+<summary>83% implemented</summary>
 
 - [X] create_activity
 - [X] create_state_machine
@@ -11329,7 +11329,7 @@
 - [X] list_executions
 - [X] list_map_runs
 - [X] list_state_machine_aliases
-- [ ] list_state_machine_versions
+- [X] list_state_machine_versions
 - [X] list_state_machines
 - [X] list_tags_for_resource
 - [ ] publish_state_machine_version
@@ -11346,7 +11346,7 @@
 - [X] update_map_run
 - [X] update_state_machine
 - [X] update_state_machine_alias
-- [ ] validate_state_machine_definition
+- [X] validate_state_machine_definition
 </details>
 
 ## sts
