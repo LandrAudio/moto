@@ -1,3 +1,4 @@
+import gc
 import io
 import os
 import os.path
@@ -54,6 +55,12 @@ SIGNING_ALIASES = {
 
 # Some services are only recognizable by the version
 SERVICE_BY_VERSION = {"2009-04-15": "sdb"}
+
+# A request body this big is dropped as soon as its response is built, and the cyclic garbage
+# collector runs once big requests of COLLECT_AFTER_BYTES in all were answered since it last ran
+# (see DomainDispatcherApplication)
+BIG_REQUEST_BYTES = 1024 * 1024
+COLLECT_AFTER_BYTES = 64 * 1024 * 1024
 
 
 class DomainDispatcherApplication:
@@ -316,7 +323,68 @@ class DomainDispatcherApplication:
 
     def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
         backend_app = self.get_application(environ)
-        return backend_app(environ, start_response)
+        try:
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            length = 0
+        if length < BIG_REQUEST_BYTES:
+            return backend_app(environ, start_response)
+        return self._call_and_collect(backend_app, environ, start_response, length)
+
+    _uncollected_bytes = 0
+    _uncollected_lock = Lock()
+    _collecting = Lock()
+
+    @classmethod
+    def _call_and_collect(
+        cls,
+        backend_app: Any,
+        environ: dict[str, Any],
+        start_response: Any,
+        length: int,
+    ) -> list[bytes]:
+        """
+        The request objects (environ, Flask's and werkzeug's request, the response object) hold
+        the body in reference cycles, which only the cyclic garbage collector frees, and it runs
+        after many small allocations, not after a few big ones: 40 CreateFunction of 35 MB kept
+        ~3.9 GB. After a big request, the response is built (so it is not streamed) and closed,
+        the body dropped, and once big requests of COLLECT_AFTER_BYTES were answered, the cycles
+        collected: by one thread at a time, so that concurrent big requests (S3 multipart parts)
+        do not each run a collection. Big means a Content-Length of BIG_REQUEST_BYTES or more:
+        a chunked request (no Content-Length) is not counted.
+        """
+        result = None
+        try:
+            result = backend_app(environ, start_response)
+            response_chunks = list(result)
+        finally:
+            close = getattr(result, "close", None)
+            if close:
+                close()
+            del result
+            # The server holds the environ until the response is sent
+            environ["wsgi.input"] = io.BytesIO()
+            for name in [n for n in environ if n.startswith(("werkzeug.", "flask."))]:
+                environ.pop(name, None)
+            cls._collect_after(length)
+        return response_chunks
+
+    @classmethod
+    def _collect_after(cls, length: int) -> None:
+        with cls._uncollected_lock:
+            cls._uncollected_bytes += length
+            if cls._uncollected_bytes < COLLECT_AFTER_BYTES:
+                return
+        # One collection at a time: a request that finds one running leaves its bytes counted,
+        # so the next big request collects them
+        if not cls._collecting.acquire(blocking=False):
+            return
+        try:
+            with cls._uncollected_lock:
+                cls._uncollected_bytes = 0
+            gc.collect()
+        finally:
+            cls._collecting.release()
 
 
 def create_backend_app(service: backends.SERVICE_NAMES) -> Flask:
