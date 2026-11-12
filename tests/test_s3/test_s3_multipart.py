@@ -1485,3 +1485,83 @@ def test_create_multipart_upload_with_content_type(bucket_name=None):
     assert resp["Bucket"] == bucket_name
     assert resp["Key"] == key
     assert resp["UploadId"]
+
+
+@mock_aws
+def test_get_object_acl_of_a_multipart_upload_without_acl():
+    client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name)
+    client.put_object(Bucket=bucket_name, Key="single", Body=b"data")
+
+    upload_id = client.create_multipart_upload(Bucket=bucket_name, Key="multi")[
+        "UploadId"
+    ]
+    part = client.upload_part(
+        Bucket=bucket_name, Key="multi", UploadId=upload_id, PartNumber=1, Body=b"data"
+    )
+    client.complete_multipart_upload(
+        Bucket=bucket_name,
+        Key="multi",
+        UploadId=upload_id,
+        MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+    )
+
+    multi = client.get_object_acl(Bucket=bucket_name, Key="multi")["Grants"]
+    single = client.get_object_acl(Bucket=bucket_name, Key="single")["Grants"]
+    assert multi == single
+    assert [g["Permission"] for g in multi] == ["FULL_CONTROL"]
+
+
+@mock_aws
+def test_a_multipart_upload_without_acl_does_not_take_the_bucket_acl():
+    client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name, ACL="public-read")
+
+    upload_id = client.create_multipart_upload(Bucket=bucket_name, Key="multi")[
+        "UploadId"
+    ]
+    part = client.upload_part(
+        Bucket=bucket_name, Key="multi", UploadId=upload_id, PartNumber=1, Body=b"data"
+    )
+    client.complete_multipart_upload(
+        Bucket=bucket_name,
+        Key="multi",
+        UploadId=upload_id,
+        MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+    )
+
+    # An object's ACL is its own: the default grants its owner FULL_CONTROL, nothing more
+    grants = client.get_object_acl(Bucket=bucket_name, Key="multi")["Grants"]
+    assert [g["Permission"] for g in grants] == ["FULL_CONTROL"]
+    assert grants[0]["Grantee"]["Type"] == "CanonicalUser"
+
+
+@mock_aws
+def test_multipart_upload_keeps_its_own_acl():
+    client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name)
+
+    upload_id = client.create_multipart_upload(
+        Bucket=bucket_name, Key="multi", ACL="public-read"
+    )["UploadId"]
+    part = client.upload_part(
+        Bucket=bucket_name, Key="multi", UploadId=upload_id, PartNumber=1, Body=b"data"
+    )
+    client.complete_multipart_upload(
+        Bucket=bucket_name,
+        Key="multi",
+        UploadId=upload_id,
+        MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+    )
+
+    grants = client.get_object_acl(Bucket=bucket_name, Key="multi")["Grants"]
+    assert {
+        "Grantee": {
+            "Type": "Group",
+            "URI": "http://acs.amazonaws.com/groups/global/AllUsers",
+        },
+        "Permission": "READ",
+    } in grants
