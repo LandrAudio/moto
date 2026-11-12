@@ -52,5 +52,12 @@ stepfunctions
 - [X] update_map_run
 - [X] update_state_machine
 - [X] update_state_machine_alias
-- [ ] validate_state_machine_definition
+- [X] validate_state_machine_definition
+  
+Only syntax and schema errors are reported, as diagnostics with severity ERROR and without a location.
+AWS' semantic checks (unknown Next-targets, missing end states, unreachable states, ...) and AWS' warnings are not yet supported.
+
+A definition that uses a feature Moto's ASL parser does not support (for instance a Task with an integration that Moto does not know, such as HTTP Tasks) is reported as OK.
+Request the WARNING severity to see a diagnostic with the code MOTO_UNSUPPORTED_DEFINITION in that case.
+
 
