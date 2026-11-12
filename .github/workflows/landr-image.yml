@@ -1,6 +1,7 @@
-# LANDR fork: the Moto server image (linux/amd64 + linux/arm64) on a tag such as 5.2.3-landr.1,
-# pushed to ghcr.io/landraudio/emulation-moto:<tag>. The digest goes to the job summary: it is
-# the reference the emulated kit pins (compose.kit.yml x-moto-image).
+# LANDR fork: the Moto server image (linux/amd64 + linux/arm64) on a tag such as 5.2.3-landr.1 or
+# 5.2.3-landr.1-rc.1, pushed to ghcr.io/landraudio/emulation-moto:<tag> (not rebuilt if that image tag
+# exists). The digest goes to the job summary: it is the reference the emulated kit pins
+# (compose.kit.yml x-moto-image).
 name: LANDR image
 
 on:
@@ -29,7 +30,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # A tag whose image is already in the registry is not built again: a release tag on the commit of a
+      # release candidate gets the candidate's image by digest (imagetools create), with no rebuild
+      - id: existing
+        name: Already published?
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if manifest=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest}}' 2>/dev/null); then
+            echo "digest=$(jq -r .digest <<<"$manifest")" >> "$GITHUB_OUTPUT"
+            echo "${IMAGE}:${TAG} already exists: not rebuilt"
+          fi
       - id: build
+        if: steps.existing.outputs.digest == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -43,7 +56,7 @@ jobs:
             org.opencontainers.image.version=${{ github.ref_name }}
       - name: Digest
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.existing.outputs.digest }}
           TAG: ${{ github.ref_name }}
         run: |
           {
