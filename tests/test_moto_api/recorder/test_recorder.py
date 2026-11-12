@@ -1,13 +1,16 @@
 import base64
 import json
 import os
-from unittest import SkipTest, TestCase
+import threading
+from typing import Any
+from unittest import SkipTest, TestCase, mock
 
 import boto3
 import requests
 
 from moto import mock_aws, settings
 from moto.moto_api import recorder
+from moto.moto_api._internal.recorder.models import Recorder
 from moto.server import ThreadedMotoServer
 from tests import EXAMPLE_AMI_ID
 
@@ -295,3 +298,54 @@ class TestThreadedMotoServer(TestCase):
         resp = s3.get_object(Bucket="mybucket", Key="data")
         assert resp["Body"].read() == b"ABCD"
         server.stop()
+
+
+def test_a_big_entry_is_not_interleaved_with_another_one(tmp_path):
+    # Its own Recorder (not the global one), writing to its own file
+    rec = Recorder()
+    rec._user_enabled = True
+    rec._location = str(tmp_path / "recording")
+    first_is_writing, second_is_writing = threading.Event(), threading.Event()
+    real_open = open
+
+    class File:
+        """Flushes every write, as a write bigger than the file's buffer is"""
+
+        def __init__(self, *args: Any, **kwargs: Any):
+            self.file = real_open(*args, **kwargs)
+
+        def __enter__(self) -> "File":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            self.file.close()
+
+        def write(self, text: str) -> None:
+            if threading.current_thread().name == "first":
+                if not first_is_writing.is_set():
+                    first_is_writing.set()
+                    # Give the second request the chance to write in between
+                    second_is_writing.wait(timeout=1)
+            else:
+                second_is_writing.set()
+            self.file.write(text)
+            self.file.flush()
+
+    def record(n: int) -> None:
+        request = mock.Mock(url=f"http://moto/bucket/key{n}", method="PUT", headers={})
+        rec._record_request(request, b"x" * 20_000)
+
+    with mock.patch("moto.moto_api._internal.recorder.models.open", File, create=True):
+        first = threading.Thread(target=record, args=(1,), name="first")
+        first.start()
+        assert first_is_writing.wait(timeout=5)
+        second = threading.Thread(target=record, args=(2,), name="second")
+        second.start()
+        first.join()
+        second.join()
+
+    lines = (tmp_path / "recording").read_text().splitlines()
+    assert [json.loads(line)["url"] for line in lines] == [
+        "http://moto/bucket/key1",
+        "http://moto/bucket/key2",
+    ]

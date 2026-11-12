@@ -2,11 +2,15 @@ import base64
 import io
 import json
 import os
+import threading
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 from botocore.awsrequest import AWSPreparedRequest
+
+# Serialises access to the recording file between the threads of this process
+_write_lock = threading.Lock()
 
 
 class Recorder:
@@ -56,10 +60,12 @@ class Recorder:
             body_str, body_encoded = self._encode_body(body)
         entry.update({"body": body_str, "body_encoded": body_encoded})
 
+        # One write per entry, under the lock: an entry bigger than the file's buffer (a large
+        # or base64 body) is flushed in pieces, and an entry recorded from another thread
+        # (ThreadedMotoServer, the server's threads) in between would share its line
         filepath = self._location
-        with open(filepath, "a+") as file:
-            file.write(json.dumps(entry))
-            file.write("\n")
+        with _write_lock, open(filepath, "a+") as file:
+            file.write(json.dumps(entry) + "\n")
 
     def _encode_body(self, body: Any) -> tuple[str, bool]:
         body_encoded = False
@@ -78,7 +84,7 @@ class Recorder:
         Resets the recording. This will erase any requests made previously.
         """
         filepath = self._location
-        with open(filepath, "w"):
+        with _write_lock, open(filepath, "w"):
             pass
 
     def start_recording(self) -> None:
@@ -97,7 +103,7 @@ class Recorder:
         filepath = self._location
         if isinstance(data, str):
             data = data.encode("utf-8")
-        with open(filepath, "bw") as file:
+        with _write_lock, open(filepath, "bw") as file:
             file.write(data)
 
     def download_recording(self) -> str:
@@ -105,7 +111,7 @@ class Recorder:
         Download the current recording. The result can be uploaded afterwards.
         """
         filepath = self._location
-        with open(filepath) as file:
+        with _write_lock, open(filepath) as file:
             return file.read()
 
     def replay_recording(self, target_host: str | None = None) -> None:
@@ -119,7 +125,8 @@ class Recorder:
         old_setting = self._user_enabled
         self._user_enabled = False
 
-        with open(filepath) as file:
+        # Read under the lock (no half-written last entry), replay without it
+        with _write_lock, open(filepath) as file:
             entries = file.readlines()
 
         for row in entries:
