@@ -1,0 +1,5 @@
+# landr-test.yml: the lint toolchain, pinned (PIP_CONSTRAINT), so that a release after Moto 5.2.3 does not turn
+# make lint red without a change of ours. pyparsing 3.3.3 made infix_notation untyped (mypy no-untyped-call in
+# moto/glue/utils.py); 3.3.2 is the version in the image (constraints.txt). Raise both on a rebase.
+mypy==2.4.1
+pyparsing==3.3.2
