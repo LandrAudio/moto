@@ -229,3 +229,25 @@ def test_state_machine_can_be_executed_multiple_times():
             assert status == "SUCCEEDED"
     finally:
         _teardown(client, iam, role_name, state_machine_arn)
+
+
+@mock_aws(config={"stepfunctions": {"execute_state_machine": True}})
+def test_executions_started_without_a_name_get_a_uuid():
+    client = boto3.client("stepfunctions", region_name="us-east-1")
+    definition = {"StartAt": "P", "States": {"P": {"Type": "Pass", "End": True}}}
+    state_machine_arn = client.create_state_machine(
+        name="unnamed",
+        definition=json.dumps(definition),
+        roleArn="arn:aws:iam::123456789012:role/unknown_sf_role",
+    )["stateMachineArn"]
+
+    first = client.start_execution(stateMachineArn=state_machine_arn)
+    second = client.start_execution(stateMachineArn=state_machine_arn)
+
+    assert first["executionArn"] != second["executionArn"]
+    for execution in (first, second):
+        name = execution["executionArn"].split(":")[-1]
+        assert name != "None"
+        assert len(name) == 36
+        described = client.describe_execution(executionArn=execution["executionArn"])
+        assert described["name"] == name
