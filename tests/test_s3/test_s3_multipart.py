@@ -431,6 +431,79 @@ def test_multipart_upload_cancel():
     assert "Uploads" not in s3_client.list_multipart_uploads(Bucket=bucket_name)
 
 
+def _seed(a: int) -> None:
+    base = (
+        "http://localhost:5000"
+        if settings.TEST_SERVER_MODE
+        else "https://motoapi.amazonaws.com"
+    )
+    kwargs = {}
+    if settings.is_test_proxy_mode():
+        add_proxy_details(kwargs)
+    requests.post(f"{base}/moto-api/seed?a={a}", **kwargs)
+
+
+@mock_aws
+def test_multipart_upload_ids_follow_the_seed():
+    client = boto3.client("s3", region_name=DEFAULT_REGION_NAME)
+    bucket_name = str(uuid4())
+    client.create_bucket(Bucket=bucket_name)
+
+    _seed(42)
+    first = client.create_multipart_upload(Bucket=bucket_name, Key="k")["UploadId"]
+    _seed(42)
+    second = client.create_multipart_upload(Bucket=bucket_name, Key="k")["UploadId"]
+
+    assert first == second
+    assert re.match(r"^[A-Za-z0-9]{40,}$", first)
+
+
+def test_a_recorded_multipart_upload_replays():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Starts its own server")
+    from moto.server import ThreadedMotoServer
+
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    server.start()
+    try:
+        url = f"http://127.0.0.1:{server._server.port}"  # type: ignore[union-attr]
+        client = boto3.client(
+            "s3",
+            region_name="us-east-1",
+            endpoint_url=url,
+            aws_access_key_id="ak",
+            aws_secret_access_key="sk",
+        )
+        requests.post(f"{url}/moto-api/reset")
+        requests.post(f"{url}/moto-api/recorder/reset-recording")
+        requests.post(f"{url}/moto-api/seed?a=42")
+        requests.post(f"{url}/moto-api/recorder/start-recording")
+        client.create_bucket(Bucket="pkgs")
+        upload_id = client.create_multipart_upload(Bucket="pkgs", Key="pkg.zip")[
+            "UploadId"
+        ]
+        part = client.upload_part(
+            Bucket="pkgs", Key="pkg.zip", UploadId=upload_id, PartNumber=1, Body=b"zip"
+        )
+        client.complete_multipart_upload(
+            Bucket="pkgs",
+            Key="pkg.zip",
+            UploadId=upload_id,
+            MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+        )
+        requests.post(f"{url}/moto-api/recorder/stop-recording")
+        recording = requests.get(f"{url}/moto-api/recorder/download-recording").content
+
+        requests.post(f"{url}/moto-api/reset")
+        requests.post(f"{url}/moto-api/seed?a=42")
+        requests.post(f"{url}/moto-api/recorder/upload-recording", data=recording)
+        requests.post(f"{url}/moto-api/recorder/replay-recording")
+
+        assert client.get_object(Bucket="pkgs", Key="pkg.zip")["Body"].read() == b"zip"
+    finally:
+        server.stop()
+
+
 @mock_aws
 @reduced_min_part_size
 def test_multipart_etag_quotes_stripped():
