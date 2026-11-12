@@ -435,9 +435,12 @@ def _seed(a: int) -> None:
     base = (
         "http://localhost:5000"
         if settings.TEST_SERVER_MODE
-        else "http://motoapi.amazonaws.com"
+        else "https://motoapi.amazonaws.com"
     )
-    requests.post(f"{base}/moto-api/seed?a={a}")
+    kwargs = {}
+    if settings.is_test_proxy_mode():
+        add_proxy_details(kwargs)
+    requests.post(f"{base}/moto-api/seed?a={a}", **kwargs)
 
 
 @mock_aws
