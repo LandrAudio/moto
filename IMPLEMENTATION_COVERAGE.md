@@ -11530,7 +11530,7 @@
 
 ## stepfunctions
 <details>
-<summary>78% implemented</summary>
+<summary>81% implemented</summary>
 
 - [X] create_activity
 - [X] create_state_machine
@@ -11568,7 +11568,7 @@
 - [X] update_map_run
 - [X] update_state_machine
 - [X] update_state_machine_alias
-- [ ] validate_state_machine_definition
+- [X] validate_state_machine_definition
 </details>
 
 ## sts

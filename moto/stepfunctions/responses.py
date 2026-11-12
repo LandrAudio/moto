@@ -198,6 +198,15 @@ class StepFunctionResponse(BaseResponse):
             response["stateMachineVersionArn"] = state_machine.latest_version.arn  # type: ignore
         return ActionResult(response)
 
+    def validate_state_machine_definition(self) -> ActionResult:
+        response = self.stepfunction_backend.validate_state_machine_definition(
+            definition=self._get_param("definition"),
+            sm_type=self._get_param("type"),
+            severity=self._get_param("severity"),
+            max_results=self._get_int_param("maxResults"),
+        )
+        return ActionResult(response)
+
     def update_state_machine_alias(self) -> ActionResult:
         arn = self._get_param("stateMachineAliasArn")
         description = self._get_param("description")
