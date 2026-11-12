@@ -126,8 +126,22 @@ class _VolumeRefCount:
         self.volume = volume
 
 
+def _docker_volume_name(name: str) -> str:
+    """
+    The Docker volume holding a function's code (or its layers). With MOTO_DOCKER_NETWORK_NAME
+    set, the name is scoped by it (sha256 of "<network>/<name>", still 64 hex characters), so
+    that Moto servers on their own networks that share one Docker daemon do not share, and
+    remove, each other's volumes. Servers that share a network (or use MOTO_DOCKER_NETWORK_MODE)
+    still share them. Without it, names are unchanged.
+    """
+    network = settings.moto_network_name()
+    if not network or not name:
+        return name
+    return hashlib.sha256(f"{network}/{name}".encode()).hexdigest()
+
+
 class _DockerDataVolumeContext:
-    # {sha256: _VolumeRefCount}
+    # {volume name: _VolumeRefCount}
     _data_vol_map: dict[str, _VolumeRefCount] = defaultdict(
         lambda: _VolumeRefCount(0, None)
     )
@@ -144,20 +158,21 @@ class _DockerDataVolumeContext:
     def __enter__(self) -> _DockerDataVolumeContext:
         # See if volume is already known
         with self.__class__._lock:
-            self._vol_ref = self.__class__._data_vol_map[self._lambda_func.code_digest]
+            volume_name = _docker_volume_name(self._lambda_func.code_digest)
+            self._vol_ref = self.__class__._data_vol_map[volume_name]
             self._vol_ref.refcount += 1
             if self._vol_ref.refcount > 1:
                 return self
 
             # See if the volume already exists
             for vol in self._lambda_func.docker_client.volumes.list():
-                if vol.name == self._lambda_func.code_digest:
+                if vol.name == volume_name:
                     self._vol_ref.volume = vol
                     return self
 
             # It doesn't exist so we need to create it
             self._vol_ref.volume = self._lambda_func.docker_client.volumes.create(
-                self._lambda_func.code_digest
+                volume_name
             )
             volumes = {self.name: {"bind": settings.LAMBDA_DATA_DIR, "mode": "rw"}}
 
@@ -219,20 +234,21 @@ class _DockerDataVolumeLayerContext:
     def __enter__(self) -> _DockerDataVolumeLayerContext:
         # See if volume is already known
         with self.__class__._lock:
-            self._vol_ref = self.__class__._data_vol_map[self.hash]
+            volume_name = _docker_volume_name(self.hash)
+            self._vol_ref = self.__class__._data_vol_map[volume_name]
             self._vol_ref.refcount += 1
             if self._vol_ref.refcount > 1:
                 return self
 
             # See if the volume already exists
             for vol in self._lambda_func.docker_client.volumes.list():
-                if vol.name == self.hash:
+                if vol.name == volume_name:
                     self._vol_ref.volume = vol
                     return self
 
             # It doesn't exist so we need to create it
             self._vol_ref.volume = self._lambda_func.docker_client.volumes.create(
-                self.hash
+                volume_name
             )
             # If we don't have any layers to apply, just return at this point
             # When invoking the function, we will bind this empty volume
