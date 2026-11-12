@@ -3125,6 +3125,9 @@ class S3Response(BaseResponse):
             tagging = self._tagging_from_headers(request.headers)
             storage_type = request.headers.get("x-amz-storage-class", "STANDARD")
             acl = self._acl_from_headers(request.headers)
+            if acl is None:
+                # As in AWS, an object uploaded without an ACL gets the default one (its owner's FULL_CONTROL)
+                acl = get_canned_acl("private")
 
             multipart = self.backend.create_multipart_upload(
                 bucket_name,
