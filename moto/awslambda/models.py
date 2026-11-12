@@ -283,6 +283,57 @@ class _DockerDataVolumeLayerContext:
                     raise  # multiple processes trying to use same volume?
 
 
+class _CodeStore:
+    """
+    One copy of each distinct code package (by sha256), whatever the number of functions
+    and layer versions made from it: many functions deployed from one large zip would
+    otherwise each hold their own copy.
+
+    A package is held while a function (any version) or a layer version of any account or
+    region uses it; the others are dropped when a package is stored and when a Lambda
+    backend is reset.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held: dict[str, bytes] = {}
+
+    def intern(self, data: bytes, sha_hex_digest: str) -> bytes:
+        if not data:
+            return data
+        with self._lock:
+            # The function or layer version being created is not stored yet: keep its package
+            self._drop_unused(keep=sha_hex_digest)
+            return self._held.setdefault(sha_hex_digest, data)
+
+    def prune(self) -> None:
+        with self._lock:
+            self._drop_unused()
+
+    def _drop_unused(self, keep: str | None = None) -> None:
+        if not self._held:
+            return
+        used = _code_digests_in_use()
+        for digest in [d for d in self._held if d != keep and d not in used]:
+            del self._held[digest]
+
+
+def _code_digests_in_use() -> set[str]:
+    # Both Lambda backends: the Docker one, and the simple one (use_docker=False)
+    from moto.awslambda_simple.models import lambda_simple_backends
+
+    used: set[str] = set()
+    all_backends: list[BackendDict[Any]] = [lambda_backends, lambda_simple_backends]
+    for backends in all_backends:
+        for account_backends in list(backends.values()):
+            for backend in list(account_backends.values()):
+                used.update(backend.code_digests_in_use())
+    return used
+
+
+_code_store = _CodeStore()
+
+
 def _zipfile_content(zipfile_content: str | bytes) -> tuple[bytes, int, str, str]:
     try:
         to_unzip_code = base64.b64decode(bytes(zipfile_content, "utf-8"))  # type: ignore[arg-type]
@@ -464,7 +515,8 @@ class LayerVersion(CloudFormationModel):
                 self.code_size,
                 self.code_sha_256,
                 self.code_digest,
-            ) = _zipfile_content(self.content["ZipFile"])
+            ) = _zipfile_content(self.content.pop("ZipFile"))
+            self.code_bytes = _code_store.intern(self.code_bytes, self.code_digest)
         else:
             partition = get_partition(region)
             key = _validate_s3_bucket_and_key(
@@ -477,6 +529,7 @@ class LayerVersion(CloudFormationModel):
                     self.code_sha_256,
                     self.code_digest,
                 ) = _s3_content(key)
+                self.code_bytes = _code_store.intern(self.code_bytes, self.code_digest)
             else:
                 self.code_bytes = b""
                 self.code_size = 0
@@ -877,15 +930,17 @@ class LambdaFunction(CloudFormationModel, DockerModel):
             return
 
         if "ZipFile" in updated_spec:
-            if from_update:
-                self.code["ZipFile"] = updated_spec["ZipFile"]
-
+            # The decoded package is kept (once, see _CodeStore), not the request's base64
+            zip_file = updated_spec["ZipFile"]
+            if not from_update:
+                del self.code["ZipFile"]
             (
                 self.code_bytes,
                 self.code_size,
                 self.code_sha_256,
                 self.code_digest,
-            ) = _zipfile_content(updated_spec["ZipFile"])
+            ) = _zipfile_content(zip_file)
+            self.code_bytes = _code_store.intern(self.code_bytes, self.code_digest)
 
             # TODO: we should be putting this in a lambda bucket
             self.code["UUID"] = str(random.uuid4())
@@ -921,14 +976,18 @@ class LambdaFunction(CloudFormationModel, DockerModel):
                     self.code_sha_256,
                     self.code_digest,
                 ) = _s3_content(key)
+                self.code_bytes = _code_store.intern(self.code_bytes, self.code_digest)
             else:
                 self.code_bytes = b""
                 self.code_size = 0
                 self.code_sha_256 = ""
+                self.code_digest = ""
             if from_update:
                 self.code["S3Bucket"] = updated_spec["S3Bucket"]
                 self.code["S3Key"] = updated_spec["S3Key"]
         elif "ImageUri" in updated_spec:
+            # No code package any more
+            self.code_digest = ""
             if settings.lambda_stub_ecr():
                 self.code_sha_256 = hashlib.sha256(
                     updated_spec["ImageUri"].encode("utf-8")
@@ -2003,6 +2062,26 @@ class LambdaBackend(BaseBackend, TaggableResourcesMixin):
         self._lambdas = LambdaStorage(region_name=region_name, account_id=account_id)
         self._event_source_mappings: dict[str, EventSourceMapping] = {}
         self._layers = LayerStorage()
+
+    def reset(self) -> None:
+        super().reset()
+        # Release the code packages only this backend's functions and layers used
+        _code_store.prune()
+
+    def code_digests_in_use(self) -> set[str]:
+        """The sha256 of every code package a function (any version) or layer version holds"""
+        used: set[str] = set()
+        for function in list(self._lambdas._functions.values()):
+            for fn in [function["latest"], *function["versions"]]:
+                # Image functions have no code package
+                digest = getattr(fn, "code_digest", "") if fn is not None else ""
+                if digest:
+                    used.add(digest)
+        for layer in list(self._layers._layers.values()):
+            for layer_version in list(layer.layer_versions.values()):
+                if getattr(layer_version, "code_digest", ""):
+                    used.add(layer_version.code_digest)
+        return used
 
     def create_alias(
         self,
