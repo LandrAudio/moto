@@ -371,6 +371,46 @@ class JSONParser(BaseJSONParser):
         return self._parse_shape(shape, parsed_json)
 
 
+class RpcV2CBORParser(BaseJSONParser):
+    """Smithy RPCv2 CBOR: the request is the operation's input structure, as one CBOR map."""
+
+    def _do_parse(self, request_dict, shape):
+        parsed = self.MAP_TYPE()
+        if shape is not None:
+            body = request_dict["body"]
+            value = self._decode_body(body) if body else {}
+            parsed = self._parse_shape(shape, value)
+        return parsed
+
+    @staticmethod
+    def _decode_body(body):
+        from moto.core.cbor import CborTag, cbor_decode
+
+        if isinstance(body, str):
+            body = body.encode("latin-1")
+        try:
+            value = cbor_decode(body)
+        except ValueError as e:
+            raise RequestParserError(str(e))
+
+        def untag(item):
+            # Tag 1: a timestamp, in epoch seconds
+            if isinstance(item, CborTag):
+                return untag(item.value)
+            if isinstance(item, dict):
+                return {k: untag(v) for k, v in item.items()}
+            if isinstance(item, list):
+                return [untag(v) for v in item]
+            return item
+
+        return untag(value)
+
+    def _parse_blob(self, shape, value):
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        return super()._parse_blob(shape, value)
+
+
 class BaseRestParser(RequestParser):
     def _do_parse(self, request_dict, shape):
         final_parsed = {}
@@ -676,6 +716,7 @@ PROTOCOL_PARSERS = {
     "query": QueryParser,
     "rest-json": RestJSONParser,
     "rest-xml": RestXMLParser,
+    "smithy-rpc-v2-cbor": RpcV2CBORParser,
 }
 
 

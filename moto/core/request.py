@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from werkzeug.wrappers import Request
@@ -36,8 +36,21 @@ def normalize_request(request: AWSPreparedRequest | Request) -> Request:
     return normalized_request
 
 
+def is_rpc_v2_cbor(headers: Any) -> bool:
+    """Smithy RPCv2 CBOR: every request carries the smithy-protocol header (even one without a body)"""
+    # Header names are case-insensitive, but headers may come as a plain dict (Smithy-Protocol from werkzeug)
+    value = next(
+        (v for k, v in headers.items() if str(k).lower() == "smithy-protocol"), ""
+    )
+    if isinstance(value, bytes):
+        value = value.decode("latin-1")
+    return value == "rpc-v2-cbor"
+
+
 def determine_request_protocol(
-    service_model: ServiceModel, content_type: str | None = None
+    service_model: ServiceModel,
+    content_type: str | None = None,
+    rpc_v2_cbor: bool = False,
 ) -> str:
     protocol = str(service_model.protocol)
     # Short circuit protocol detection for S3 because the ContentType header
@@ -45,6 +58,8 @@ def determine_request_protocol(
     if service_model.service_name == "s3":
         return protocol
     supported_protocols = service_model.metadata.get("protocols", [protocol])
+    if rpc_v2_cbor and "smithy-rpc-v2-cbor" in supported_protocols:
+        return "smithy-rpc-v2-cbor"
     content_type = content_type if content_type is not None else ""
     if content_type in JSON_TYPES:
         protocol = "rest-json" if content_type == APPLICATION_JSON else "json"

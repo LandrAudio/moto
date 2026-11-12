@@ -583,6 +583,94 @@ class BaseJSONSerializer(ResponseSerializer):
         super()._serialize_type_structure(serialized, value, shape, key)
 
 
+class RpcV2CBORSerializer(BaseJSONSerializer):
+    """
+    Smithy RPCv2 CBOR: the JSON protocol's document, as CBOR. Timestamps are tag 1 (epoch
+    seconds), blobs are byte strings, errors carry __type (the error's shape ID) and message.
+    https://smithy.io/2.0/additional-specs/protocols/smithy-rpc-v2.html
+    """
+
+    CONTENT_TYPE = "application/cbor"
+
+    def _serialized_result_to_response(
+        self,
+        resp: ResponseDict,
+        result: Any,
+        shape: StructureShape | None,
+        serialized_result: MutableMapping[str, Any],
+    ) -> ResponseDict:
+        resp = super()._serialized_result_to_response(
+            resp, result, shape, serialized_result
+        )
+        resp["headers"]["smithy-protocol"] = "rpc-v2-cbor"
+        return resp
+
+    def _serialized_error_to_response(
+        self,
+        resp: ResponseDict,
+        error: Exception,
+        shape: ErrorShape,
+        serialized_error: MutableMapping[str, Any],
+    ) -> ResponseDict:
+        resp = super()._serialized_error_to_response(
+            resp, error, shape, serialized_error
+        )
+        resp["headers"]["smithy-protocol"] = "rpc-v2-cbor"
+        return resp
+
+    def _get_protocol_specific_content_type(self) -> str:
+        return self.CONTENT_TYPE
+
+    def _get_protocol_specific_error_code(self, error: ErrorShape) -> str:
+        return error.name
+
+    def _serialize_error_metadata(
+        self,
+        serialized: Serialized,
+        error: Exception,
+        shape: ErrorShape,
+    ) -> None:
+        super()._serialize_error_metadata(serialized, error, shape)
+        # The error's absolute shape ID
+        namespace = error_namespace(self.service_model)
+        serialized["__type"] = f"{namespace}#{shape.name}"
+        if "Message" in serialized:
+            serialized["message"] = serialized["Message"]
+
+    def _serialize_body(self, body: Mapping[str, Any]) -> bytes:  # type: ignore[override]
+        from moto.core.cbor import cbor_encode
+
+        return cbor_encode(body)
+
+    def _serialize_type_timestamp(
+        self, serialized: Serialized, value: Any, shape: Shape, key: str
+    ) -> None:
+        from moto.core.cbor import CborTag
+
+        wrapper: dict[str, Any] = {}
+        TimestampSerializer(TimestampSerializer.TIMESTAMP_FORMAT_UNIX).serialize(
+            wrapper, value, shape, "timestamp"
+        )
+        self._default_serialize(
+            serialized, CborTag(1, float(wrapper["timestamp"])), shape, key
+        )
+
+    def _serialize_type_blob(
+        self, serialized: Serialized, value: Any, shape: Shape, key: str
+    ) -> None:
+        if isinstance(value, str):
+            value = value.encode(self.DEFAULT_ENCODING)
+        self._default_serialize(serialized, bytes(value), shape, key)
+
+
+def error_namespace(service_model: ServiceModel) -> str:
+    """The Smithy namespace of a service's shapes, e.g. com.amazonaws.cloudwatch"""
+    service_id = str(
+        service_model.metadata.get("serviceId", service_model.service_name)
+    )
+    return "com.amazonaws." + service_id.lower().replace(" ", "")
+
+
 class BaseXMLSerializer(ResponseSerializer):
     CONTENT_TYPE = "text/xml"
 
@@ -1232,6 +1320,7 @@ SERIALIZERS = {
     "query-json": QueryJSONSerializer,
     "rest-json": RestJSONSerializer,
     "rest-xml": RestXMLSerializer,
+    "smithy-rpc-v2-cbor": RpcV2CBORSerializer,
 }
 SERVICE_SPECIFIC_SERIALIZERS: dict[str, dict[str, type[ResponseSerializer]]] = {
     "s3": {"rest-xml": S3Serializer},
