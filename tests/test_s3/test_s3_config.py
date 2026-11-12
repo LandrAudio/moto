@@ -299,6 +299,77 @@ def test_s3_lifecycle_config_dict():
 
 
 @mock_aws
+def test_s3_lifecycle_config_dict_with_object_size_filters():
+    if not settings.TEST_DECORATOR_MODE:
+        raise unittest.SkipTest("Not using boto3 - no point in testing server-mode")
+    s3_config_query_backend = s3_config_query.backends[DEFAULT_ACCOUNT_ID]["global"]
+    s3_config_query_backend.create_bucket("bucket1", "us-west-2")
+
+    lifecycle = [
+        {
+            "ID": "greater_than",
+            "Status": "Enabled",
+            "Filter": {"ObjectSizeGreaterThan": 0},
+            "Expiration": {"Days": 1},
+        },
+        {
+            "ID": "less_than",
+            "Status": "Enabled",
+            "Filter": {"ObjectSizeLessThan": 1024},
+            "Expiration": {"Days": 1},
+        },
+        {
+            "ID": "and",
+            "Status": "Enabled",
+            "Filter": {
+                "And": {
+                    "Prefix": "logs/",
+                    "ObjectSizeGreaterThan": 128,
+                    "ObjectSizeLessThan": 1024,
+                }
+            },
+            "Expiration": {"Days": 1},
+        },
+    ]
+    s3_config_query_backend.put_bucket_lifecycle("bucket1", lifecycle)
+
+    filters = [
+        rule.to_config_dict()["filter"]
+        for rule in s3_config_query_backend.buckets["bucket1"].rules
+    ]
+    assert filters == [
+        {
+            "predicate": {
+                "type": "LifecycleObjectSizeGreaterThanPredicate",
+                "objectSizeGreaterThan": 0,
+            }
+        },
+        {
+            "predicate": {
+                "type": "LifecycleObjectSizeLessThanPredicate",
+                "objectSizeLessThan": 1024,
+            }
+        },
+        {
+            "predicate": {
+                "type": "LifecycleAndOperator",
+                "operands": [
+                    {"type": "LifecyclePrefixPredicate", "prefix": "logs/"},
+                    {
+                        "type": "LifecycleObjectSizeGreaterThanPredicate",
+                        "objectSizeGreaterThan": 128,
+                    },
+                    {
+                        "type": "LifecycleObjectSizeLessThanPredicate",
+                        "objectSizeLessThan": 1024,
+                    },
+                ],
+            }
+        },
+    ]
+
+
+@mock_aws
 def test_s3_notification_config_dict():
     if not settings.TEST_DECORATOR_MODE:
         raise unittest.SkipTest("Not using boto3 - no point in testing server-mode")
