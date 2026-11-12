@@ -35,8 +35,21 @@ jobs:
         run: make init
       - name: Lint (ruff, mypy)
         run: make lint
-      - name: Tests of the touched services (no Docker-backed tests)
+      # As upstream's Makefile (test-only): most suites serially; the big ones with -n 4 --dist loadscope (a
+      # module's or class's tests on one worker), MOTO_CALL_RESET_API=false, and the clean-slate tests apart.
+      # Several test modules start a ThreadedMotoServer on a fixed port (5001 in test_core and test_s3): spread
+      # over workers, the second bind fails in the server thread and start() waits forever.
+      - name: Tests of the touched services, serially (no Docker-backed tests)
         run: >-
-          pytest -n 4 -rs -m "not requires_docker"
-          tests/test_s3 tests/test_stepfunctions tests/test_ec2 tests/test_cloudwatch
-          tests/test_awslambda tests/test_core tests/test_moto_api
+          pytest -rs -m "not requires_docker"
+          tests/test_core tests/test_moto_api tests/test_stepfunctions tests/test_cloudwatch
+      - name: Tests of the touched services, in parallel (no Docker-backed tests)
+        env:
+          MOTO_CALL_RESET_API: "false"
+        run: >-
+          pytest -n 4 --dist loadscope -rs -m "not requires_docker and not requires_clean_slate"
+          tests/test_s3 tests/test_ec2 tests/test_awslambda
+      - name: Clean-slate tests of the parallel services
+        run: >-
+          pytest -rs -m "requires_clean_slate and not requires_docker"
+          tests/test_s3 tests/test_ec2 tests/test_awslambda
