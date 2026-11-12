@@ -35,7 +35,7 @@ stepfunctions
 - [X] list_executions
 - [X] list_map_runs
 - [X] list_state_machine_aliases
-- [ ] list_state_machine_versions
+- [X] list_state_machine_versions
 - [X] list_state_machines
 - [X] list_tags_for_resource
 - [ ] publish_state_machine_version

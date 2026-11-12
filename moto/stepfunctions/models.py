@@ -699,6 +699,14 @@ class StepFunctionBackend(BaseBackend, TaggableResourcesMixin):
             raise StateMachineDoesNotExist(f"State Machine Does Not Exist: '{arn}'")
         return sorted(sm.aliases.values(), key=lambda x: x.creation_date)
 
+    @paginate(pagination_model=PAGINATION_MODEL)
+    def list_state_machine_versions(self, arn: str) -> list[StateMachineVersion]:
+        sm = next((x for x in self.state_machines if x.arn == arn), None)
+        if not sm:
+            raise StateMachineDoesNotExist(f"State Machine Does Not Exist: '{arn}'")
+        # Newest first: version numbers only grow (creation dates can be equal)
+        return [sm.versions[n] for n in sorted(sm.versions, reverse=True)]
+
     def describe_state_machine(self, arn: str) -> StateMachine:
         self._validate_machine_arn(arn)
         sm = next((x for x in self.state_machines if x.arn == arn), None)
