@@ -204,6 +204,36 @@ def test_object_copy__sends_to_queue():
 
 
 @mock_aws
+def test_object_put__event_key_keeps_slashes():
+    s3_client = boto3.client("s3", region_name=REGION_NAME)
+    sqs_client = boto3.client("sqs", region_name=REGION_NAME)
+    bucket_name = str(uuid4())
+    s3_client.create_bucket(Bucket=bucket_name)
+    queue_url = sqs_client.create_queue(QueueName=str(uuid4())[0:6])["QueueUrl"]
+    queue_arn = sqs_client.get_queue_attributes(
+        QueueUrl=queue_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+    s3_client.put_bucket_notification_configuration(
+        Bucket=bucket_name,
+        NotificationConfiguration={
+            "QueueConfigurations": [
+                {"QueueArn": queue_arn, "Events": ["s3:ObjectCreated:Put"]}
+            ]
+        },
+    )
+    # The test event
+    sqs_client.receive_message(QueueUrl=queue_url)
+    sqs_client.purge_queue(QueueUrl=queue_url)
+
+    s3_client.put_object(Bucket=bucket_name, Key="a/b c.txt", Body=b"x")
+
+    messages = sqs_client.receive_message(QueueUrl=queue_url)["Messages"]
+    records = json.loads(messages[0]["Body"])["Records"]
+    # As AWS: "/" is kept, a space becomes "+"
+    assert records[0]["s3"]["object"]["key"] == "a/b+c.txt"
+
+
+@mock_aws
 def test_object_put__sends_to_queue__using_filter():
     s3_res = boto3.resource("s3", region_name=REGION_NAME)
     s3_client = boto3.client("s3", region_name=REGION_NAME)
@@ -425,7 +455,7 @@ def test_put_bucket_notification_sns_sqs_raw_delivery():
     assert message_body["Records"][0]["eventName"] == "ObjectCreated:Put"
     assert message_body["Records"][0]["awsRegion"] == REGION_NAME
     assert message_body["Records"][0]["s3"]["configurationId"] == "SomeID"
-    assert message_body["Records"][0]["s3"]["object"]["key"] == "incoming%2Fmyfile"
+    assert message_body["Records"][0]["s3"]["object"]["key"] == "incoming/myfile"
 
 
 @mock_aws

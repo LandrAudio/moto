@@ -72,7 +72,8 @@ def _get_s3_event(
     event_name = event_name[3:]
     event_time = iso_8601_datetime_with_milliseconds()
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-content-structure.html
-    key_name = quote_plus(key.name)
+    # As AWS: URL-encoded with spaces as "+", but "/" kept
+    key_name = quote_plus(key.name, safe="/")
     return {
         "Records": [
             {
